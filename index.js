@@ -1,63 +1,96 @@
-import express from "express";
-import axios from "axios";
+// index.js
+
+/*
+ * Middleware para encaminhar mensagens do Chatwoot para a Evolution API.
+ *
+ * Envia anexos recebidos via webhook do Chatwoot para o Evolution
+ * no formato base64, incluindo número do WhatsApp, legenda e mimetype.
+ */
+
+const express = require('express');
+const axios   = require('axios');
+
+// Configurações via variáveis de ambiente
+const PORT               = process.env.PORT || 3000;
+const EVOLUTION_URL      = process.env.EVOLUTION_URL || '';      // Ex.: https://evolutionapi.seudominio.com
+const EVOLUTION_TOKEN    = process.env.EVOLUTION_TOKEN || '';    // Token Bearer (se necessário)
+const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || ''; // Nome da instância Evolution
+
+// Função para normalizar URLs de mídia vindas do Chatwoot
+function normaliseMediaUrl(url) {
+  if (!url) return '';
+  let fixed = url.trim();
+  // Corrige urls que começam com 'http://https/'
+  fixed = fixed.replace(/^http:\/\/https\//i, 'https://');
+  // Remove barras duplas após o protocolo
+  fixed = fixed.replace(/^(https?:\/\/)(\/+)/, '$1');
+  return fixed;
+}
 
 const app = express();
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json({ limit: '10mb' }));
 
-const EVOLUTION_API = process.env.EVOLUTION_API; // ex: https://sua-evolution.com
-const EVOLUTION_TOKEN = process.env.EVOLUTION_TOKEN;
-const INSTANCE_KEY = process.env.INSTANCE_KEY; // ex: a1moni
-
-app.post("/chatwoot", async (req, res) => {
+// Webhook do Chatwoot
+app.post('/chatwoot', async (req, res) => {
+  const payload = req.body;
   try {
-    const payload = req.body;
-
-    // Se não tiver anexo, ignora
-    if (!payload?.attachments?.length) {
-      return res.json({ ok: true, skip: "no media" });
+    // Garante que há anexos
+    if (!payload || !payload.message || !Array.isArray(payload.message.attachments) || payload.message.attachments.length === 0) {
+      return res.status(200).json({ message: 'Nenhum anexo a processar' });
     }
 
-    const media = payload.attachments[0];
-    const mediaUrl = media.data_url;
-    const mime = media.file_type;
-    const phone = payload.conversation?.contact_inbox?.source_id;
+    // Pega o primeiro anexo
+    const attachment = payload.message.attachments[0];
+    const mediaUrl   = normaliseMediaUrl(attachment.data_url || attachment.thumb_url || '');
+    const mimeType   = attachment.file_type || 'application/octet-stream';
+    const caption    = payload.message.content || '';
 
-    if (!phone) {
-      return res.json({ error: "missing phone" });
+    // Pega o número de WhatsApp do Chatwoot
+    const waNumber = payload.conversation?.contact_inbox?.source_id;
+    if (!waNumber) {
+      return res.status(400).json({ message: 'Número do WhatsApp não encontrado no payload' });
+    }
+    if (!mediaUrl) {
+      return res.status(400).json({ message: 'URL da mídia inválida' });
     }
 
-    // Baixa o arquivo do Chatwoot
-    const response = await axios.get(mediaUrl, {
-      responseType: "arraybuffer",
-    });
+    // Baixa o arquivo como arraybuffer
+    const mediaResponse = await axios.get(mediaUrl, { responseType: 'arraybuffer' });
+    const base64Data = Buffer.from(mediaResponse.data, 'binary').toString('base64');
 
-    const buffer = Buffer.from(response.data);
+    // Monta payload para Evolution
+    const evoPayload = {
+      number:   waNumber,
+      caption:  caption,
+      media:    base64Data,
+      mimetype: mimeType
+    };
 
-    console.log("Mídia recebida do Chatwoot, enviando ao Evolution...");
+    // Define headers (envia token se houver)
+    const evoHeaders = { 'Content-Type': 'application/json' };
+    if (EVOLUTION_TOKEN) {
+      evoHeaders['Authorization'] = `Bearer ${EVOLUTION_TOKEN}`;
+    }
 
-    // Envia a mídia ao Evolution
-    const evoRes = await axios.post(
-      `${EVOLUTION_API}/message/sendMedia/${INSTANCE_KEY}`,
-      {
-        number: phone,
-        caption: payload.content || "",
-        media: buffer.toString("base64"),
-        mimetype: mime,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${EVOLUTION_TOKEN}`,
-        },
-      }
-    );
+    // Endpoint da Evolution
+    const evoEndpoint = `${EVOLUTION_URL.replace(/\\/+$/, '')}/message/sendMedia/${EVOLUTION_INSTANCE}`;
 
-    return res.json({ success: true, evolution: evoRes.data });
-  } catch (err) {
-    console.error("Erro no middleware:", err.message);
-    return res.status(500).json({ error: err.message });
+    // Chama a Evolution API
+    await axios.post(evoEndpoint, evoPayload, { headers: evoHeaders });
+
+    return res.status(200).json({ message: 'Mídia encaminhada com sucesso' });
+  } catch (error) {
+    console.error('Erro no middleware:', error.message);
+    return res.status(500).json({ error: 'Falha ao processar o anexo', details: error.message });
   }
 });
 
-app.listen(3000, () => {
-  console.log("Middleware Chatwoot → Evolution rodando na porta 3000");
+// Endpoint de verificação
+app.get('/', (req, res) => {
+  res.send('Middleware Chatwoot → Evolution em execução');
+});
+
+// Inicia o servidor
+app.listen(PORT, () => {
+  console.log(`Middleware ouvindo na porta ${PORT}`);
 });
