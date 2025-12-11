@@ -1,96 +1,108 @@
-// index.js
-
-/*
- * Middleware para encaminhar mensagens do Chatwoot para a Evolution API.
- *
- * Envia anexos recebidos via webhook do Chatwoot para o Evolution
- * no formato base64, incluindo número do WhatsApp, legenda e mimetype.
- */
+// index.js - Middleware Chatwoot → Evolution (CommonJS)
 
 const express = require('express');
-const axios   = require('axios');
-
-// Configurações via variáveis de ambiente
-const PORT               = process.env.PORT || 3000;
-const EVOLUTION_URL      = process.env.EVOLUTION_URL || '';      // Ex.: https://evolutionapi.seudominio.com
-const EVOLUTION_TOKEN    = process.env.EVOLUTION_TOKEN || '';    // Token Bearer (se necessário)
-const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || ''; // Nome da instância Evolution
-
-// Função para normalizar URLs de mídia vindas do Chatwoot
-function normaliseMediaUrl(url) {
-  if (!url) return '';
-  let fixed = url.trim();
-  // Corrige urls que começam com 'http://https/'
-  fixed = fixed.replace(/^http:\/\/https\//i, 'https://');
-  // Remove barras duplas após o protocolo
-  fixed = fixed.replace(/^(https?:\/\/)(\/+)/, '$1');
-  return fixed;
-}
+const bodyParser = require('body-parser');
 
 const app = express();
-app.use(express.json({ limit: '10mb' }));
+app.use(bodyParser.json({ limit: '50mb' }));
 
-// Webhook do Chatwoot
-app.post('/chatwoot', async (req, res) => {
-  const payload = req.body;
+const PORT = process.env.PORT || 3000;
+const EVOLUTION_URL = process.env.EVOLUTION_URL || '';
+const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || '';
+const EVOLUTION_TOKEN = process.env.EVOLUTION_TOKEN || ''; // se usar token na Evolution
+
+// Remove / extra se tiver no final da URL
+function getBaseUrl(url) {
+  if (!url) return '';
+  return url.endsWith('/') ? url.slice(0, -1) : url;
+}
+
+if (!EVOLUTION_URL || !EVOLUTION_INSTANCE) {
+  console.error('❌ Defina EVOLUTION_URL e EVOLUTION_INSTANCE nas variáveis de ambiente!');
+}
+
+// Rota que o Chatwoot vai chamar
+app.post('/chatwoot-hook', async (req, res) => {
   try {
-    // Garante que há anexos
-    if (!payload || !payload.message || !Array.isArray(payload.message.attachments) || payload.message.attachments.length === 0) {
-      return res.status(200).json({ message: 'Nenhum anexo a processar' });
+    const payload = req.body;
+    const message = payload?.message;
+
+    if (!message) {
+      return res.status(200).json({ ok: true, ignore: 'sem message no payload' });
     }
 
-    // Pega o primeiro anexo
-    const attachment = payload.message.attachments[0];
-    const mediaUrl   = normaliseMediaUrl(attachment.data_url || attachment.thumb_url || '');
-    const mimeType   = attachment.file_type || 'application/octet-stream';
-    const caption    = payload.message.content || '';
-
-    // Pega o número de WhatsApp do Chatwoot
-    const waNumber = payload.conversation?.contact_inbox?.source_id;
-    if (!waNumber) {
-      return res.status(400).json({ message: 'Número do WhatsApp não encontrado no payload' });
-    }
-    if (!mediaUrl) {
-      return res.status(400).json({ message: 'URL da mídia inválida' });
+    // Só reenviar mensagens do agente
+    if (!message.sender || message.sender.type !== 'agent') {
+      return res.status(200).json({ ok: true, ignore: 'não é mensagem de agente' });
     }
 
-    // Baixa o arquivo como arraybuffer
-    const mediaResponse = await axios.get(mediaUrl, { responseType: 'arraybuffer' });
-    const base64Data = Buffer.from(mediaResponse.data, 'binary').toString('base64');
+    const phone = message?.additional_attributes?.phone;
+    if (!phone) {
+      return res.status(200).json({ ok: true, ignore: 'sem telefone em additional_attributes.phone' });
+    }
 
-    // Monta payload para Evolution
-    const evoPayload = {
-      number:   waNumber,
-      caption:  caption,
-      media:    base64Data,
-      mimetype: mimeType
+    const number = phone.replace(/\D/g, '');
+    const to = `${number}@s.whatsapp.net`;
+    const baseUrl = getBaseUrl(EVOLUTION_URL);
+
+    let endpoint = '';
+    let body = {};
+
+    // TEXTO
+    if (message.content_type === 'text') {
+      endpoint = `${baseUrl}/message/sendText/${EVOLUTION_INSTANCE}`;
+      body = {
+        number: to,
+        text: message.content || ''
+      };
+
+    // IMAGEM
+    } else if (message.content_type === 'image') {
+      const attachment = message.attachments && message.attachments[0];
+      const mediaUrl = attachment?.data_url || attachment?.file_url;
+
+      endpoint = `${baseUrl}/message/sendMedia/${EVOLUTION_INSTANCE}`;
+      body = {
+        number: to,
+        type: 'image',
+        caption: message.content || '',
+        url: mediaUrl
+      };
+
+    } else {
+      // outros tipos ainda não tratados
+      return res.status(200).json({ ok: true, ignore: `tipo ${message.content_type} ainda não tratado` });
+    }
+
+    const headers = {
+      'Content-Type': 'application/json'
     };
-
-    // Define headers (envia token se houver)
-    const evoHeaders = { 'Content-Type': 'application/json' };
     if (EVOLUTION_TOKEN) {
-      evoHeaders['Authorization'] = `Bearer ${EVOLUTION_TOKEN}`;
+      headers['Authorization'] = `Bearer ${EVOLUTION_TOKEN}`;
     }
 
-    // Endpoint da Evolution
-    const evoEndpoint = `${EVOLUTION_URL.replace(/\\/+$/, '')}/message/sendMedia/${EVOLUTION_INSTANCE}`;
+    // Node 20 já tem fetch global
+    const evoRes = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body)
+    });
 
-    // Chama a Evolution API
-    await axios.post(evoEndpoint, evoPayload, { headers: evoHeaders });
+    const evoText = await evoRes.text();
+    console.log('➡️ Enviado para Evolution:', evoRes.status, evoText);
 
-    return res.status(200).json({ message: 'Mídia encaminhada com sucesso' });
-  } catch (error) {
-    console.error('Erro no middleware:', error.message);
-    return res.status(500).json({ error: 'Falha ao processar o anexo', details: error.message });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('Erro no middleware:', err);
+    return res.status(500).json({ ok: false, error: String(err) });
   }
 });
 
-// Endpoint de verificação
+// Rota simples pra testar no navegador
 app.get('/', (req, res) => {
-  res.send('Middleware Chatwoot → Evolution em execução');
+  res.send('Middleware Chatwoot → Evolution rodando!');
 });
 
-// Inicia o servidor
 app.listen(PORT, () => {
-  console.log(`Middleware ouvindo na porta ${PORT}`);
+  console.log(`Middleware Chatwoot → Evolution rodando na porta ${PORT}`);
 });
