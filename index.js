@@ -1,5 +1,3 @@
-// index.js - Middleware Chatwoot → Evolution (CommonJS)
-
 const express = require('express');
 const bodyParser = require('body-parser');
 
@@ -9,9 +7,8 @@ app.use(bodyParser.json({ limit: '50mb' }));
 const PORT = process.env.PORT || 3000;
 const EVOLUTION_URL = process.env.EVOLUTION_URL || '';
 const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || '';
-const EVOLUTION_TOKEN = process.env.EVOLUTION_TOKEN || ''; // se usar token na Evolution
+const EVOLUTION_TOKEN = process.env.EVOLUTION_TOKEN || '';
 
-// Remove / extra se tiver no final da URL
 function getBaseUrl(url) {
   if (!url) return '';
   return url.endsWith('/') ? url.slice(0, -1) : url;
@@ -21,7 +18,6 @@ if (!EVOLUTION_URL || !EVOLUTION_INSTANCE) {
   console.error('❌ Defina EVOLUTION_URL e EVOLUTION_INSTANCE nas variáveis de ambiente!');
 }
 
-// Rota que o Chatwoot vai chamar
 app.post('/chatwoot-hook', async (req, res) => {
   try {
     const payload = req.body;
@@ -31,7 +27,6 @@ app.post('/chatwoot-hook', async (req, res) => {
       return res.status(200).json({ ok: true, ignore: 'sem message no payload' });
     }
 
-    // Só reenviar mensagens do agente
     if (!message.sender || message.sender.type !== 'agent') {
       return res.status(200).json({ ok: true, ignore: 'não é mensagem de agente' });
     }
@@ -48,15 +43,12 @@ app.post('/chatwoot-hook', async (req, res) => {
     let endpoint = '';
     let body = {};
 
-    // TEXTO
     if (message.content_type === 'text') {
       endpoint = `${baseUrl}/message/sendText/${EVOLUTION_INSTANCE}`;
       body = {
         number: to,
         text: message.content || ''
       };
-
-    // IMAGEM
     } else if (message.content_type === 'image') {
       const attachment = message.attachments && message.attachments[0];
       const mediaUrl = attachment?.data_url || attachment?.file_url;
@@ -68,9 +60,7 @@ app.post('/chatwoot-hook', async (req, res) => {
         caption: message.content || '',
         url: mediaUrl
       };
-
     } else {
-      // outros tipos ainda não tratados
       return res.status(200).json({ ok: true, ignore: `tipo ${message.content_type} ainda não tratado` });
     }
 
@@ -81,7 +71,6 @@ app.post('/chatwoot-hook', async (req, res) => {
       headers['Authorization'] = `Bearer ${EVOLUTION_TOKEN}`;
     }
 
-    // Node 20 já tem fetch global
     const evoRes = await fetch(endpoint, {
       method: 'POST',
       headers,
@@ -98,7 +87,6 @@ app.post('/chatwoot-hook', async (req, res) => {
   }
 });
 
-// Rota simples pra testar no navegador
 app.get('/', (req, res) => {
   res.send('Middleware Chatwoot → Evolution rodando!');
 });
